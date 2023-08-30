@@ -106,7 +106,7 @@ enddef
 
 export def MapModeFilter(modes: string, pattern: string,
                exact: bool = true, field: string = 'lhs'): func
-    var expr = $"m['{field}'] ={exact ? '=' : '~'} '{pattern}'"
+    var expr = $"m['{field}'] {exact ? '==' : '=~'} '{pattern}'"
     return MapModeFilterExpr(modes, expr)
 enddef
 
@@ -131,8 +131,13 @@ if !debug_test
     finish
 endif
 
-##########################
+#########################################################################
+#########################################################################
+#########################################################################
+
 # Following is for testing
+
+const use_raelity_autoload = false
 
 # use the "C" defines. Might help to see what's going on
 const NORMAL       = 0x01
@@ -163,7 +168,11 @@ const expect_mode_bits_table = {
 #    echo printf("%s: 0x%04x", k, v)
 #endfor
 
-import autoload 'Raelity/vim_assist.vim' as vass
+if use_raelity_autoload
+    import autoload 'Raelity/vim_assist.vim' as vass
+else
+    import autoload './vim_assist.vim' as vass
+endif
 var DictUniqueCopy = vass.DictUniqueCopy
 
 if expect_mode_bits_table != mode_bits_table

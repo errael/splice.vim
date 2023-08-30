@@ -1,9 +1,20 @@
 vim9script
 
-import autoload './vim_assist.vim'
-import autoload '../../splice.vim'
+var import_autoload = true
+#if expand('<script>:p') =~ '^/home/err/experiment/vim/splice'
+#    import_autoload = false
+#endif
 
-# export Log, LogInit
+if import_autoload
+    import autoload './ui.vim'
+    import autoload './vim_assist.vim'
+else
+    import './ui.vim'
+    import './vim_assist.vim'
+endif
+
+const IndentLtoS = vim_assist.IndentLtoS
+const Scripts = vim_assist.Scripts
 
 #
 # Logging
@@ -14,32 +25,123 @@ import autoload '../../splice.vim'
 # NOTE: the log file is never trunctated, persists, grows without limit
 #
 
+# TODO: Put this somewhere else: maybe copy it to g:logging_exclude.
+#       Maybe AddExclude/RemoveExclude methods in here
+
+g:splice_logging_exclude = [ 'focus', 'result', 'setting' ]
 #
-# global for simple access from python
-# TODO: AddExclude/AddInclude methods then these can forward to python
-#       and won't need global
-#
-g:splice_logging_exclude = [ 'focus' ]
+#g:splice_logging_exclude = []
 
 var fname: string
 var logging_enabled: bool = false
+
+# TODO: popup?
+def Logging_problem(s: string)
+    Log(s, 'internal_error', true, '')
+    echomsg expand("<stack>")
+    echomsg s
+enddef
+
 #
-# Invoked as either Log(msg) or Log(category, msg).
-# Check to see if category should be logged.
+# Conditionally log to a file based on logging enabled and optional category.
+# The message is split by "\n" and passed to writefile()
+# Output example: "The log msg"
+# Output example: "CATEGORY: The log msg"
+# NOTE: category is checked with ignore case, output as upper case
 #
-export def Log(arg1: string, arg2: string = null_string)
+#   - Log(msg: string [, category = ''[, stack = true[, command = '']]])
+#   - Log(func(): string [, category = ''[, stack = true[, command = '']]])
+#
+# If optional stack is true, the stacktrace from where Log is called
+# is output to the log.
+#
+# If optional command, the command is run using execute() and the command
+# output is output to the log.
+#
+export def Log(msgOrFunc: any, category: string = '',
+        stack: bool = false, command: string = '')
     if ! logging_enabled
         return
     endif
-    # typical case one arg; arg1 is msg
-    var msg = arg1
-    var category: string = null_string
-    if arg2 != null
-        category = arg1
-        msg = arg2
+    if !!category && g:splice_logging_exclude->index(category, 0, true) >= 0
+        return
     endif
 
-    writefile([ msg ], fname, 'a')
+    var msg: string
+    if !!category
+        msg = category->toupper() .. ': '
+    endif
+
+    var msg_type = type(msgOrFunc)
+    if msg_type == v:t_string 
+        msg ..= <string>msgOrFunc
+    elseif msg_type == v:t_func
+        try
+            var F: func = msgOrFunc
+            msg ..= F()
+        catch /.*/
+            Logging_problem(printf("LOGGING USAGE BUG: FUNC: %s, caught %s.",
+                typename(msg), v:exception))
+            return
+        endtry
+    else
+            Logging_problem(printf("LOGGING USAGE BUG: msg TYPE: %s.", typename(msgOrFunc)))
+            return
+    endif
+
+    if stack
+        msg ..= "\n  stack:"
+        var stack_info = StackTrace()->slice(1)
+        msg ..= "\n" .. IndentLtoS(stack_info)
+    endif
+
+    if !!command
+        msg ..= "\n" .. "  command '" .. command .. "' output:"
+        try
+            msg ..= "\n" .. execute(command)->split("\n")->IndentLtoS()
+        catch /.*/
+            Logging_problem(printf("LOGGING USAGE BUG: command : %s, caught: %s.",
+                command, v:exception))
+            return
+        endtry
+    endif
+
+    writefile(msg->split("\n"), fname, 'a')
+enddef
+
+var scripts_cache = Scripts()
+export def StackTrace(): list<string>
+    # slice(1): don't include this function in trace
+    var stack = expand('<stack>')->split('\.\.')->reverse()->slice(1)
+    stack->map((_, frame) => {
+        return FixStackFrame(frame)
+    })
+    return stack
+enddef
+
+def FixStackFrame(frame: string): string
+    # nPath is the number of path components to include
+    const nPath = 2
+    var m = matchlist(frame, '\v\<SNR\>(\d+)_')
+    if !!m
+        for _ in [1, 2]
+            var path = scripts_cache->get(m[1], '')
+            if !!path
+                var p = path->split('[/\\]')[- nPath : ]->join('/')
+                return substitute(frame, '\v\<SNR\>\d+_', p .. '::', '')
+            endif
+            Scripts(scripts_cache) # executes first iteration, 2nd breaks
+        endfor
+    elseif frame->stridx('#') >= 0
+        var path = frame->split('#')
+        var function = path->remove(-1)
+        return '#' .. path[- nPath : ]->join('/') .. '.vim::' .. function
+    endif
+    return frame
+enddef
+
+export def LogStack(tag: string = '')
+    Log(tag .. ': ' .. expand('<stack>'))
 enddef
 
 var log_init = false
@@ -54,43 +156,18 @@ enddef
 
 # TODO: may add some kind of "how to close" info in E
 #       make E dict<dict<any>>
+# TODO: This should not be in log.vim, either import or put popup elsewhere
 const E = {
     ENOTFILE: ["Current buffer, '%s', doesn't support '%s'", 'Command Issue'],
     ENOCONFLICT: ["No more conflicts"],
 }
-
-# dismiss on any key
-def FilterClose(winid: number, key: string): bool
-    popup_close(winid)
-    return true
-enddef
-
-def PopupError(msg: list<string>, other: list<any> = [])
-
-    var options = {
-        minwidth: 20,
-        tabpage: -1,
-        zindex: 300,
-        border: [],
-        padding: [1, 2, 1, 2],
-        highlight: splice.hl_alert_popup,
-        close: 'click',
-        mousemoved: 'any', moved: 'any',
-        mapping: false, filter: FilterClose
-        }
-    if len(other) > 0
-        options.title = ' ' .. other[0] .. ' '
-    endif
-
-    popup_create(msg, options)
-enddef
 
 
 export def SplicePopup(e_idx: string, ...extra: list<any>)
     var err = E[e_idx]
     var msg = call('printf', [ err[0] ] + extra)
     Log(msg)
-    PopupError([msg], err[ 1 : ])
+    ui.PopupError([msg], err[ 1 : ])
 enddef
 
-#defcompile
+
